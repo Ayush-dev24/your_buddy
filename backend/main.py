@@ -3,6 +3,7 @@ import io
 import time
 import json
 import logging
+import uuid
 from typing import List, Dict, Any
 
 from fastapi import FastAPI, UploadFile, File, Request
@@ -72,6 +73,7 @@ default_cors_origins = [
     "http://127.0.0.1:5500",
     "https://4chuck.github.io",
     "http://127.0.0.1:8000",
+    "http://localhost:8000",
     "http://localhost:3000",
     "http://127.0.0.1:3000",
     "https://your-buddy-phi.vercel.app",
@@ -111,6 +113,7 @@ class QueryRequest(BaseModel):
     query: str
     mode: str = "qa"
     options: Dict[str, Any] = Field(default_factory=dict)
+    selected_document_ids: List[str] = Field(default_factory=list)
 
 # ---------------- HEALTH ----------------
 @app.get("/")
@@ -122,7 +125,7 @@ def health():
     return {"status": "ok"}
 
 # ---------------- FILE VALIDATION ----------------
-ALLOWED_EXTENSIONS = {".pdf", ".docx", ".txt", ".pptx"}
+ALLOWED_EXTENSIONS = {".pdf", ".docx", ".txt", ".pptx", ".md", ".csv", ".json", ".log", ".html", ".xml"}
 
 def is_valid_file(filename: str) -> bool:
     return os.path.splitext(filename)[1].lower() in ALLOWED_EXTENSIONS
@@ -203,6 +206,7 @@ async def upload_files(
             )
 
         total_chunks = 0
+        uploaded_documents: List[Dict[str, Any]] = []
 
         for file in files:
             if not file.filename or not is_valid_file(file.filename):
@@ -219,10 +223,21 @@ async def upload_files(
                     content={"status": "error", "message": "File too large"},
                 )
 
-            text = extract_text_from_file(file.filename, io.BytesIO(file_bytes))
+            document_id = str(uuid.uuid4())
+            try:
+                text = extract_text_from_file(file.filename, io.BytesIO(file_bytes))
+            except Exception as e:
+                logger.exception("Text extraction failed")
+                return JSONResponse(
+                    status_code=500,
+                    content={"status": "error", "message": f"Failed to extract text from {file.filename}: {str(e)}"},
+                )
 
             if not text:
-                continue
+                return JSONResponse(
+                    status_code=400,
+                    content={"status": "error", "message": f"No text could be extracted from {file.filename}"},
+                )
 
             remaining = max(0, MAX_CHUNKS_PER_UPLOAD - total_chunks)
             if remaining == 0:
@@ -231,7 +246,14 @@ async def upload_files(
                     content={"status": "error", "message": "Too many chunks"},
                 )
 
-            chunks = chunk_text(text, max_chunks=remaining)
+            try:
+                chunks = chunk_text(text, max_chunks=remaining)
+            except Exception as e:
+                logger.exception("Chunking failed")
+                return JSONResponse(
+                    status_code=500,
+                    content={"status": "error", "message": f"Failed to chunk text from {file.filename}: {str(e)}"},
+                )
 
             if isinstance(chunks, list):
                 total_chunks += len(chunks)
@@ -249,6 +271,15 @@ async def upload_files(
                             user_id=session_id,
                             session_id=session_id,
                             source_file=file.filename or "upload",
+                            document_id=document_id,
+                        )
+                        uploaded_documents.append(
+                            {
+                                "id": document_id,
+                                "name": file.filename or "upload",
+                                "chunk_count": len(chunks),
+                                "size_bytes": len(file_bytes),
+                            }
                         )
                     except Exception as e:
                         logger.exception("Document store write failed")
@@ -266,6 +297,7 @@ async def upload_files(
             "status": "success",
             "files_received": len(files),
             "chunks_created": total_chunks,
+            "documents": uploaded_documents,
         }
 
     except Exception:
@@ -300,6 +332,13 @@ async def query(req: QueryRequest, request: Request):
         history = chat_memory.get(session_id, [])
         api_key_override = get_bearer_api_key(request)
 
+        selected_document_ids = [str(doc_id).strip() for doc_id in (req.selected_document_ids or []) if str(doc_id).strip()]
+        if not selected_document_ids:
+            return {
+                "status": "error",
+                "message": "Please select at least one document to generate an answer.",
+            }
+
         logger.info(f"{ip} -> {req.mode} -> {req.query}")
 
         # ---------------- RAG ----------------
@@ -309,6 +348,7 @@ async def query(req: QueryRequest, request: Request):
                 n_results=MAX_RAG_RESULTS,
                 user_id=session_id,
                 session_id=session_id,
+                selected_document_ids=selected_document_ids,
             )
         except Exception as e:
             logger.exception("RAG query failed")
@@ -324,30 +364,11 @@ async def query(req: QueryRequest, request: Request):
 
         context = "\n\n".join([str(d).strip() for d in docs if str(d).strip()])
 
-        # fallback (important fix)
         if not context:
-            try:
-                fallback = rag.query("", n_results=3, user_id=session_id, session_id=session_id)
-            except Exception as e:
-                logger.exception("RAG fallback failed")
-                return JSONResponse(
-                    status_code=500,
-                    content={"status": "error", "message": f"RAG fallback failed: {str(e) or 'unknown error'}"},
-                )
-            fallback_documents = fallback.get("documents") or [[]]
-            fallback_docs = (
-                fallback_documents[0]
-                if isinstance(fallback_documents, list) and fallback_documents
-                else []
-            )
-
-            if fallback_docs:
-                context = "\n\n".join([str(d).strip() for d in fallback_docs if str(d).strip()])
-            else:
-                return {
-                    "status": "error",
-                    "message": "No documents uploaded yet.",
-                }
+            return {
+                "status": "error",
+                "message": "No relevant content found in the selected documents.",
+            }
 
         # ---------------- AGENT ----------------
         if req.mode == "quiz":
@@ -414,3 +435,31 @@ if __name__ == "__main__":
 
     port = int(os.getenv("PORT", "8000"))
     uvicorn.run(app, host="0.0.0.0", port=port)
+
+
+@app.get("/documents")
+@limiter.limit("30/minute")
+async def list_documents(request: Request):
+    session_id = get_session_id(request)
+    if not session_id:
+        return JSONResponse(
+            status_code=400,
+            content={"status": "error", "message": "Missing session id (send x-user-id header)"},
+        )
+
+    documents = rag.list_documents(session_id=session_id)
+    return {"status": "success", "documents": documents}
+
+
+@app.delete("/documents/{document_id}")
+@limiter.limit("20/minute")
+async def delete_document(document_id: str, request: Request):
+    session_id = get_session_id(request)
+    if not session_id:
+        return JSONResponse(
+            status_code=400,
+            content={"status": "error", "message": "Missing session id (send x-user-id header)"},
+        )
+
+    deleted = rag.delete_document(session_id=session_id, document_id=document_id)
+    return {"status": "success", "deleted_chunks": deleted}

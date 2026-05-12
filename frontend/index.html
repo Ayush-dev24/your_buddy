@@ -27,7 +27,7 @@
   <body>
     <div class="app-container">
       <!-- Sidebar - File Upload & Tools -->
-      <aside class="sidebar">
+      <aside class="sidebar" id="sidebar">
         <!-- Logo -->
         <div class="logo-section">
           <div class="logo">
@@ -40,113 +40,147 @@
         </div>
 
         <!-- Upload Section -->
-        <div class="upload-container">
-          <div class="section-header">
-            <i class="fas fa-cloud-upload-alt"></i>
-            <span>Upload Documents</span>
-          </div>
-
-          <!-- Drag & Drop Area -->
-          <div class="drop-area" id="dropArea">
-            <div class="drop-icon">
-              <i class="fas fa-file-import"></i>
+        <div class="upload-container collapsible" id="uploadSection">
+          <div class="section-header collapsible-header" onclick="toggleSection('uploadContent', this)">
+            <div class="header-main">
+              <i class="fas fa-cloud-upload-alt"></i>
+              <span>Upload Documents</span>
             </div>
-            <p class="drop-title">Drag files here</p>
-            <p class="drop-subtitle">or</p>
-            <label for="fileUpload" class="upload-btn-primary">
-              <i class="fas fa-plus"></i>
-              Browse Files
-            </label>
-            <input type="file" id="fileUpload" accept="*/*" multiple hidden />
-            <p class="drop-formats">PDF, DOCX, PPTX, TXT, and more</p>
+            <i class="fas fa-chevron-down toggle-icon"></i>
           </div>
+          
+          <div id="uploadContent" class="collapsible-content active">
+            <div class="content-padding">
+              <!-- Drag & Drop Area -->
+              <div class="drop-area" id="dropArea">
+                <div class="drop-icon">
+                  <i class="fas fa-file-import"></i>
+                </div>
+                <p class="drop-title">Drag files here</p>
+                <p class="drop-subtitle">or</p>
+                <label for="fileUpload" class="upload-btn-primary">
+                  <i class="fas fa-plus"></i>
+                  Browse Files
+                </label>
+                <input type="file" id="fileUpload" accept="*/*" multiple hidden />
+                <p class="drop-formats">PDF, DOCX, PPTX, TXT, and more</p>
+              </div>
 
-          <!-- Selected Files List -->
-          <div id="selectedFilesList" class="selected-files hidden">
-            <div class="files-header">
-              <i class="fas fa-check-circle"></i>
-              <span id="filesCount">0 files selected</span>
+              <!-- Selected Files List -->
+              <div id="selectedFilesList" class="selected-files hidden">
+                <div class="files-header">
+                  <i class="fas fa-check-circle"></i>
+                  <span id="filesCount">0 files selected</span>
+                </div>
+              </div>
+
+              <!-- Upload Button -->
+              <button id="uploadFilesBtn" class="upload-btn-submit hidden" type="button">
+                <i class="fas fa-upload"></i>
+                <span>Upload & Process</span>
+              </button>
+
+              <!-- Upload Status -->
+              <div id="uploadStatus" class="upload-status hidden">
+                <div class="spinner"></div>
+                <span>Processing your files...</span>
+              </div>
+
+              <!-- File Info -->
+              <div id="fileInfo" class="file-info hidden">
+                <div class="success-badge">
+                  <i class="fas fa-check-circle"></i>
+                  <span>Ready to analyze</span>
+                </div>
+                <p id="fileName" class="file-name">document.pdf</p>
+                <button id="addMoreBtn" class="add-more-btn" type="button">
+                  <i class="fas fa-plus"></i>
+                  <span>Add More Documents</span>
+                </button>
+              </div>
             </div>
-          </div>
-
-          <!-- Upload Button -->
-          <button
-            id="uploadFilesBtn"
-            class="upload-btn-submit hidden"
-            type="button"
-          >
-            <i class="fas fa-upload"></i>
-            <span>Upload & Process</span>
-          </button>
-
-          <!-- Upload Status -->
-          <div id="uploadStatus" class="upload-status hidden">
-            <div class="spinner"></div>
-            <span>Processing your files...</span>
-          </div>
-
-          <!-- File Info -->
-          <div id="fileInfo" class="file-info hidden">
-            <div class="success-badge">
-              <i class="fas fa-check-circle"></i>
-              <span>Ready to analyze</span>
-            </div>
-            <p id="fileName" class="file-name">document.pdf</p>
           </div>
         </div>
 
         <!-- Tools Section -->
-        <div class="tools-container hidden" id="toolsSection">
+        <div class="tools-container" id="toolsSection">
           <div class="section-header">
             <i class="fas fa-toolbox"></i>
             <span>Study Tools</span>
           </div>
 
-          <div class="tools-grid">
-            <button
-              class="tool-btn active"
-              data-mode="qa"
-              title="Ask questions about your documents"
-            >
-              <div class="tool-icon">
-                <i class="fas fa-circle-question"></i>
-              </div>
-              <span>Q&A</span>
-            </button>
-            <button
-              class="tool-btn"
-              data-mode="quiz"
-              title="Generate quizzes for self-assessment"
-            >
-              <div class="tool-icon">
-                <i class="fas fa-list-check"></i>
-              </div>
-              <span>Quiz</span>
-            </button>
-            <button
-              class="tool-btn"
-              data-mode="simplify"
-              title="Explain complex topics simply"
-            >
-              <div class="tool-icon">
-                <i class="fas fa-lightbulb"></i>
-              </div>
-              <span>Simplify</span>
-            </button>
-            <button
-              class="tool-btn"
-              data-mode="agent"
-              title="Handle multi-step tasks"
-            >
-              <div class="tool-icon">
-                <i class="fas fa-robot"></i>
-              </div>
-              <span>Agent</span>
-            </button>
+          <div class="tools-grid-wrapper">
+            <div id="toolsLockOverlay" class="tools-lock-overlay">
+              <i class="fas fa-lock"></i>
+              <span>Upload to unlock</span>
+            </div>
+            <div class="tools-grid">
+              <button
+                class="tool-btn active"
+                data-mode="qa"
+                title="Ask questions about your documents"
+              >
+                <div class="tool-icon">
+                  <i class="fas fa-circle-question"></i>
+                </div>
+                <span>Q&A</span>
+              </button>
+              <button
+                class="tool-btn"
+                data-mode="quiz"
+                title="Generate quizzes for self-assessment"
+              >
+                <div class="tool-icon">
+                  <i class="fas fa-list-check"></i>
+                </div>
+                <span>Quiz</span>
+              </button>
+              <button
+                class="tool-btn"
+                data-mode="simplify"
+                title="Explain complex topics simply"
+              >
+                <div class="tool-icon">
+                  <i class="fas fa-lightbulb"></i>
+                </div>
+                <span>Simplify</span>
+              </button>
+              <button
+                class="tool-btn"
+                data-mode="agent"
+                title="Handle multi-step tasks"
+              >
+                <div class="tool-icon">
+                  <i class="fas fa-robot"></i>
+                </div>
+                <span>Agent</span>
+              </button>
+            </div>
           </div>
 
           <div class="mode-description" id="modeDescription">
             Ask any question about your documents
+          </div>
+        </div>
+
+        <!-- Document Manager -->
+        <div class="documents-container collapsible" id="docsSection">
+          <div class="section-header collapsible-header collapsed" onclick="toggleSection('docsContent', this)">
+            <div class="header-main">
+              <i class="fas fa-folder-open"></i>
+              <span>Document Manager</span>
+            </div>
+            <i class="fas fa-chevron-down toggle-icon"></i>
+          </div>
+          <div id="docsContent" class="collapsible-content collapsed">
+            <div class="content-padding">
+              <div class="doc-actions">
+                <button id="selectAllDocsBtn" type="button" class="doc-action-btn">Select All</button>
+                <button id="deselectAllDocsBtn" type="button" class="doc-action-btn">Deselect All</button>
+              </div>
+              <div id="documentsEmptyState" class="documents-empty">No processed documents yet.</div>
+              <div id="documentsList" class="documents-list"></div>
+            </div>
           </div>
         </div>
 
@@ -161,6 +195,9 @@
         <!-- Header -->
         <header class="chat-header">
           <div class="header-content">
+            <button id="sidebarToggle" class="sidebar-toggle-btn" title="Toggle Sidebar">
+              <i class="fas fa-bars"></i>
+            </button>
             <h2>AI Assistant</h2>
             <span id="currentModeBadge" class="mode-badge">Q&A Mode</span>
           </div>
@@ -186,6 +223,7 @@
 
         <!-- Input Area -->
         <div class="input-section">
+          <div id="activeDocsSummary" class="active-docs-summary">Active Documents: None selected</div>
           <form id="chatForm" class="chat-form">
             <div class="input-wrapper">
               <textarea
@@ -216,20 +254,19 @@
     <div id="apiKeyModal" class="api-key-modal-overlay">
       <div class="api-key-modal" role="dialog" aria-modal="true" aria-labelledby="apiKeyTitle">
         <h3 id="apiKeyTitle">API Access</h3>
-        <p class="api-key-subtitle">Enter API Key to continue</p>
+        <p class="api-key-subtitle">Enter Gemini API Key to continue</p>
 
         <input
           id="apiKeyInput"
           class="api-key-input"
           type="password"
-          placeholder="Enter API Key"
+          placeholder="Enter Gemini API Key"
           autocomplete="off"
         />
 
-        <label class="api-key-default-toggle">
-          <input type="checkbox" id="useDefaultKey" />
-          <span>Use default key</span>
-        </label>
+        <p class="api-key-link">
+          <a href="https://aistudio.google.com/api-keys" target="_blank">Get API key for free</a>
+        </p>
 
         <button id="apiKeyContinueBtn" class="api-key-continue-btn" type="button" disabled>
           Continue

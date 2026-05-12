@@ -31,14 +31,25 @@ const sendBtn = document.getElementById("sendBtn");
 const apiKeyModal = document.getElementById("apiKeyModal");
 const apiKeyInput = document.getElementById("apiKeyInput");
 const apiKeyContinueBtn = document.getElementById("apiKeyContinueBtn");
-const useDefaultKeyCheckbox = document.getElementById("useDefaultKey");
 const apiKeyStatus = document.getElementById("apiKeyStatus");
 const toastContainer = document.getElementById("toastContainer");
+const toolsLockOverlay = document.getElementById("toolsLockOverlay");
+const documentsList = document.getElementById("documentsList");
+const documentsEmptyState = document.getElementById("documentsEmptyState");
+const selectAllDocsBtn = document.getElementById("selectAllDocsBtn");
+const deselectAllDocsBtn = document.getElementById("deselectAllDocsBtn");
+const activeDocsSummary = document.getElementById("activeDocsSummary");
+
+const sidebar = document.getElementById("sidebar");
+const sidebarToggle = document.getElementById("sidebarToggle");
+const addMoreBtn = document.getElementById("addMoreBtn");
 
 let currentMode = "qa";
 let isProcessing = false;
 let fileUploaded = false;
 let selectedFiles = [];
+let processedDocuments = [];
+let activeDocumentIds = new Set();
 let aiResponsesDisabled = false;
 let apiGateResolved = false;
 
@@ -71,11 +82,16 @@ window.addEventListener("error", () => {
 initializeApiKeyGate();
 setupEventListeners();
 updateStatusIndicator();
+refreshDocuments();
 
 // --- Setup Event Listeners ---
 function setupEventListeners() {
+  if (sidebarToggle) sidebarToggle.addEventListener("click", () => sidebar.classList.toggle("collapsed"));
   if (fileUpload) fileUpload.addEventListener("change", handleFileSelection);
   if (uploadFilesBtn) uploadFilesBtn.addEventListener("click", uploadSelectedFiles);
+  if (addMoreBtn) addMoreBtn.addEventListener("click", showUploadArea);
+  if (selectAllDocsBtn) selectAllDocsBtn.addEventListener("click", () => setAllDocumentsActive(true));
+  if (deselectAllDocsBtn) deselectAllDocsBtn.addEventListener("click", () => setAllDocumentsActive(false));
 
   // Drag & Drop
   if (dropArea) {
@@ -132,6 +148,10 @@ function setupEventListeners() {
         return;
       }
       if (!userInput.value.trim() || isProcessing || !fileUploaded) return;
+      if (!activeDocumentIds.size) {
+        showToast("Please select at least one document to generate an answer.", "warning");
+        return;
+      }
       await processUserQuery(userInput.value.trim());
     });
 
@@ -156,7 +176,7 @@ function setupEventListeners() {
 
 // --- API Key Gate ---
 function initializeApiKeyGate() {
-  if (!apiKeyModal || !apiKeyInput || !apiKeyContinueBtn || !useDefaultKeyCheckbox) {
+  if (!apiKeyModal || !apiKeyInput || !apiKeyContinueBtn) {
     apiGateResolved = true;
     updateApiKeyStatus(getStoredApiKey());
     return;
@@ -165,10 +185,6 @@ function initializeApiKeyGate() {
   const savedKey = getStoredApiKey();
   if (savedKey && savedKey !== DEFAULT_API_KEY) {
     apiKeyInput.value = savedKey;
-  }
-  if (savedKey === DEFAULT_API_KEY) {
-    useDefaultKeyCheckbox.checked = true;
-    apiKeyInput.disabled = true;
   }
 
   updateContinueButtonState();
@@ -182,14 +198,6 @@ function initializeApiKeyGate() {
     }
   });
 
-  useDefaultKeyCheckbox.addEventListener("change", () => {
-    apiKeyInput.disabled = useDefaultKeyCheckbox.checked;
-    if (useDefaultKeyCheckbox.checked) {
-      apiKeyInput.value = "";
-    }
-    updateContinueButtonState();
-  });
-
   apiKeyContinueBtn.addEventListener("click", handleApiKeyContinue);
 
   if (apiKeyStatus) {
@@ -197,15 +205,7 @@ function initializeApiKeyGate() {
       apiGateResolved = false;
       apiKeyModal.classList.remove("hidden");
       const saved = getStoredApiKey();
-      if (saved === DEFAULT_API_KEY) {
-        useDefaultKeyCheckbox.checked = true;
-        apiKeyInput.disabled = true;
-        apiKeyInput.value = "";
-      } else {
-        useDefaultKeyCheckbox.checked = false;
-        apiKeyInput.disabled = false;
-        apiKeyInput.value = saved || "";
-      }
+      apiKeyInput.value = saved || "";
       updateContinueButtonState();
       apiKeyInput.focus();
     });
@@ -215,30 +215,28 @@ function initializeApiKeyGate() {
 }
 
 function updateContinueButtonState() {
-  if (!apiKeyContinueBtn || !apiKeyInput || !useDefaultKeyCheckbox) return;
+  if (!apiKeyContinueBtn || !apiKeyInput) return;
   const hasInput = apiKeyInput.value.trim().length > 0;
-  apiKeyContinueBtn.disabled = !hasInput && !useDefaultKeyCheckbox.checked;
+  apiKeyContinueBtn.disabled = !hasInput;
 }
 
 function handleApiKeyContinue() {
-  const useDefault = useDefaultKeyCheckbox && useDefaultKeyCheckbox.checked;
   const enteredKey = apiKeyInput ? apiKeyInput.value.trim() : "";
-  const selectedKey = useDefault ? DEFAULT_API_KEY : enteredKey;
 
-  if (!useDefault && !enteredKey) {
-    alert("API key is required.");
-    showToast("Enter a valid API key.", "warning");
+  if (!enteredKey) {
+    alert("Gemini API key is required.");
+    showToast("Enter a valid Gemini API key.", "warning");
     return;
   }
 
-  storeApiKey(selectedKey);
+  storeApiKey(enteredKey);
   apiGateResolved = true;
   aiResponsesDisabled = false;
   updateStatusIndicator();
-  updateApiKeyStatus(selectedKey);
+  updateApiKeyStatus(enteredKey);
 
   if (apiKeyModal) apiKeyModal.classList.add("hidden");
-  showToast("API key configured.", "success");
+  showToast("Gemini API key configured.", "success");
 }
 
 function updateApiKeyStatus(keyValue) {
@@ -445,6 +443,14 @@ window.removeSelectedFile = function (index) {
   renderSelectedFiles();
 };
 
+function showUploadArea() {
+  if (fileInfo) fileInfo.classList.add("hidden");
+  if (dropArea) dropArea.classList.remove("hidden");
+  selectedFiles = [];
+  if (fileUpload) fileUpload.value = "";
+  renderSelectedFiles();
+}
+
 async function uploadSelectedFiles() {
   if (!apiGateResolved) {
     showToast("Set API key first to continue.", "warning");
@@ -487,11 +493,17 @@ async function uploadSelectedFiles() {
     if (fileName) {
       fileName.textContent = `Uploaded ${result.files_received || 1} file(s), created ${result.chunks_created || 0} chunks`;
     }
-    if (toolsSection) toolsSection.classList.remove("hidden");
+    if (toolsLockOverlay) toolsLockOverlay.classList.add("hidden");
 
     if (userInput) userInput.disabled = false;
     if (sendBtn) sendBtn.disabled = false;
     fileUploaded = true;
+    if (Array.isArray(result.documents)) {
+      result.documents.forEach((doc) => {
+        if (doc && doc.id) activeDocumentIds.add(String(doc.id));
+      });
+    }
+    await refreshDocuments();
 
     appendBotMessage(
       "Files processed successfully. The knowledge base is ready. What would you like to do?"
@@ -531,6 +543,7 @@ async function processUserQuery(query) {
         body: JSON.stringify({
           query,
           mode: currentMode,
+          selected_document_ids: Array.from(activeDocumentIds),
         }),
       },
       { aiRequest: true }
@@ -777,3 +790,144 @@ function showToast(message, type = "info") {
     toast.remove();
   }, 3200);
 }
+
+async function refreshDocuments() {
+  const request = await sendApiRequestWithFallback(
+    "/documents",
+    { method: "GET" },
+    { aiRequest: false }
+  );
+
+  if (!request.ok) {
+    processedDocuments = [];
+    renderDocumentsList();
+    return;
+  }
+
+  processedDocuments = Array.isArray(request.body?.documents) ? request.body.documents : [];
+  const available = new Set(processedDocuments.map((d) => String(d.id)));
+  activeDocumentIds.forEach((id) => {
+    if (!available.has(String(id))) activeDocumentIds.delete(String(id));
+  });
+
+  fileUploaded = processedDocuments.length > 0;
+  if (toolsLockOverlay) toolsLockOverlay.classList.toggle("hidden", fileUploaded);
+  if (userInput) userInput.disabled = !fileUploaded;
+  if (sendBtn) sendBtn.disabled = !fileUploaded;
+  if (fileInfo && !fileUploaded) fileInfo.classList.add("hidden");
+  renderDocumentsList();
+}
+
+function setAllDocumentsActive(active) {
+  if (!processedDocuments.length) return;
+  if (active) {
+    processedDocuments.forEach((doc) => activeDocumentIds.add(String(doc.id)));
+  } else {
+    activeDocumentIds.clear();
+  }
+  renderDocumentsList();
+}
+
+async function removeDocument(documentId) {
+  const request = await sendApiRequestWithFallback(
+    `/documents/${encodeURIComponent(String(documentId))}`,
+    { method: "DELETE" },
+    { aiRequest: false }
+  );
+
+  if (!request.ok) {
+    showToast(request.message || "Failed to remove document.", "error");
+    return;
+  }
+
+  activeDocumentIds.delete(String(documentId));
+  await refreshDocuments();
+  showToast("Document removed.", "success");
+}
+
+function renderDocumentsList() {
+  const hasDocuments = processedDocuments.length > 0;
+  if (documentsEmptyState) {
+    documentsEmptyState.classList.toggle("hidden", hasDocuments);
+  }
+  if (!documentsList) return;
+
+  if (!hasDocuments) {
+    documentsList.innerHTML = "";
+    updateActiveDocsSummary();
+    return;
+  }
+
+  documentsList.innerHTML = processedDocuments
+    .map((doc) => {
+      const id = String(doc.id || "");
+      const name = escapeHtml(doc.name || "upload");
+      const isActive = activeDocumentIds.has(id);
+      const chunkCount = Number(doc.chunk_count || 0);
+      return `
+        <div class="doc-item ${isActive ? "active" : ""}" data-doc-id="${escapeHtml(id)}">
+          <label class="doc-checkbox-wrap">
+            <input type="checkbox" class="doc-checkbox" data-doc-id="${escapeHtml(id)}" ${isActive ? "checked" : ""} />
+            <span class="doc-name" title="${name}">${name}</span>
+          </label>
+          <div class="doc-meta-row">
+            <span class="doc-tag">${chunkCount} chunks</span>
+            <span class="doc-tag ${isActive ? "active-tag" : ""}">${isActive ? "Active" : "Inactive"}</span>
+            <button type="button" class="doc-delete-btn" data-doc-delete-id="${escapeHtml(id)}">Delete</button>
+          </div>
+        </div>
+      `;
+    })
+    .join("");
+
+  documentsList.querySelectorAll(".doc-checkbox").forEach((checkbox) => {
+    checkbox.addEventListener("change", (e) => {
+      const id = String(e.target.getAttribute("data-doc-id") || "");
+      if (!id) return;
+      if (e.target.checked) activeDocumentIds.add(id);
+      else activeDocumentIds.delete(id);
+      renderDocumentsList();
+    });
+  });
+
+  documentsList.querySelectorAll(".doc-delete-btn").forEach((btn) => {
+    btn.addEventListener("click", async (e) => {
+      const id = String(e.target.getAttribute("data-doc-delete-id") || "");
+      if (!id) return;
+      await removeDocument(id);
+    });
+  });
+
+  updateActiveDocsSummary();
+}
+
+function updateActiveDocsSummary() {
+  if (!activeDocsSummary) return;
+  const activeCount = activeDocumentIds.size;
+  if (!activeCount) {
+    activeDocsSummary.textContent = "Active Documents: None selected";
+    return;
+  }
+
+  const activeNames = processedDocuments
+    .filter((doc) => activeDocumentIds.has(String(doc.id)))
+    .map((doc) => String(doc.name || "upload"));
+  activeDocsSummary.textContent = `Active Documents (${activeCount}): ${activeNames.join(", ")}`;
+}
+
+function toggleSection(contentId, header) {
+  const content = document.getElementById(contentId);
+  if (!content) return;
+
+  const isCollapsed = content.classList.toggle("collapsed");
+  if (header) {
+    header.classList.toggle("collapsed", isCollapsed);
+  }
+}
+
+// Ensure smooth height transitions by recalculating if needed
+window.addEventListener("resize", () => {
+  document.querySelectorAll(".collapsible-content:not(.collapsed)").forEach((el) => {
+    el.style.maxHeight = "1000px";
+  });
+});

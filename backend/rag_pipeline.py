@@ -1,17 +1,19 @@
 import os
-import re
 import uuid
 import logging
 import json
-import sqlite3
-from collections import Counter
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
+
+import chromadb
+from sentence_transformers import CrossEncoder
 
 try:
     from backend.firebase_config import db
 except ImportError:
     from firebase_config import db
+
+from backend.agent import AIAgent
 
 logger = logging.getLogger(__name__)
 
@@ -23,85 +25,28 @@ class RAGPipeline:
         self.max_candidates = int(os.getenv("RAG_MAX_CANDIDATES", "200"))
         self.firestore_timeout_s = float(os.getenv("FIRESTORE_TIMEOUT_SECONDS", "10"))
         self.force_local = (os.getenv("RAG_FORCE_LOCAL", "0") or "").strip().lower() in {"1", "true", "yes"}
-        self.local_db_path = os.getenv(
-            "LOCAL_RAG_DB_PATH",
-            os.path.join(os.path.dirname(__file__), "local_rag.sqlite3"),
-        )
 
-        # If Firestore isn't initialized (missing credentials, init error, etc.),
-        # fall back to local SQLite storage automatically.
         self.firestore_enabled = (db is not None) and (not self.force_local)
 
-        self._init_local_store()
-
-    def _init_local_store(self) -> None:
-        os.makedirs(os.path.dirname(self.local_db_path), exist_ok=True)
-        with sqlite3.connect(self.local_db_path, timeout=30) as conn:
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS document_chunks (
-                    chunk_id TEXT PRIMARY KEY,
-                    user_id TEXT,
-                    session_id TEXT,
-                    content TEXT,
-                    chunk_index INTEGER,
-                    source_file TEXT,
-                    created_at REAL,
-                    metadata_json TEXT
-                )
-                """
-            )
-            conn.execute(
-                "CREATE INDEX IF NOT EXISTS idx_document_chunks_session ON document_chunks(session_id)"
-            )
-            conn.execute(
-                "CREATE INDEX IF NOT EXISTS idx_document_chunks_user ON document_chunks(user_id)"
-            )
-
-    def _tokenize(self, text: str) -> List[str]:
-        return re.findall(r"[a-zA-Z0-9]+", (text or "").lower())
+        self.agent = AIAgent()
+        
+        # Load Sentence-Transformer for Re-ranking
+        logger.info("Loading CrossEncoder model...")
+        self.re_ranker = CrossEncoder('cross-encoder/ms-marco-MiniLM-L-6-v2')
+        
+        # Initialize ChromaDB
+        chroma_db_path = os.getenv(
+            "LOCAL_RAG_DB_PATH",
+            os.path.join(os.path.dirname(__file__), "chroma_db")
+        )
+        os.makedirs(chroma_db_path, exist_ok=True)
+        self.chroma_client = chromadb.PersistentClient(path=chroma_db_path)
+        self.collection = self.chroma_client.get_or_create_collection(name=self.collection_name)
 
     def _safe_content(self, doc: Any) -> str:
-        if not isinstance(doc, dict):
-            return ""
-        return str(doc.get("content") or "").strip()
-
-    def _safe_created_at(self, doc: Any) -> float:
-        if not isinstance(doc, dict):
-            return 0.0
-        created_at = doc.get("created_at")
-        if isinstance(created_at, datetime):
-            try:
-                return created_at.timestamp()
-            except Exception:
-                return 0.0
-        if isinstance(created_at, (int, float)):
-            try:
-                return float(created_at)
-            except Exception:
-                return 0.0
-        return 0.0
-
-    def _score(self, query_tokens: List[str], content: str, lower_query: str) -> float:
-        content_text = (content or "").strip()
-        if not content_text:
-            return 0.0
-
-        content_tokens = self._tokenize(content_text)
-        if not content_tokens or not query_tokens:
-            return 0.0
-
-        q = Counter(query_tokens)
-        c = Counter(content_tokens)
-        overlap = sum(min(q[t], c.get(t, 0)) for t in q)
-
-        content_lower = content_text.lower()
-        phrase_tokens = query_tokens[:6]
-        phrase = " ".join(phrase_tokens).strip()
-        phrase_bonus = 1.5 if phrase and phrase in content_lower else 0.0
-        exact_bonus = 2.0 if lower_query and lower_query in content_lower else 0.0
-
-        return float(overlap) + phrase_bonus + exact_bonus
+        if isinstance(doc, dict):
+            return str(doc.get("content") or "").strip()
+        return str(doc).strip()
 
     def add_documents(
         self,
@@ -109,62 +54,39 @@ class RAGPipeline:
         user_id: str,
         session_id: str,
         source_file: Optional[str] = None,
+        document_id: Optional[str] = None,
     ) -> None:
         if not chunks:
             return
         if not session_id or not str(session_id).strip():
             return
 
-        # Prefer Firestore when available; automatically fall back to local SQLite
-        # if Firestore is unavailable or the write fails (offline dev, emulator not
-        # running, network restrictions, etc.).
         if self.firestore_enabled:
             try:
-                self._add_documents_firestore(
-                    chunks=chunks,
-                    user_id=user_id,
-                    session_id=session_id,
-                    source_file=source_file,
-                )
-                return
+                self._add_documents_firestore(chunks, user_id, session_id, source_file, document_id)
             except Exception as e:
-                logger.warning("Firestore add_documents failed; falling back to SQLite: %s", e)
+                logger.warning("Firestore add_documents failed; falling back to local: %s", e)
                 self.firestore_enabled = False
 
-        self._add_documents_sqlite(
-            chunks=chunks,
-            user_id=user_id,
-            session_id=session_id,
-            source_file=source_file,
-        )
+        self._add_documents_chroma(chunks, user_id, session_id, source_file, document_id)
 
-    def _add_documents_firestore(
-        self,
-        chunks: List[Any],
-        user_id: str,
-        session_id: str,
-        source_file: Optional[str],
-    ) -> None:
+    def _add_documents_firestore(self, chunks, user_id, session_id, source_file, document_id):
         if db is None:
             raise RuntimeError("Firestore client not initialized")
-
         collection = db.collection(self.collection_name)
         batch = db.batch()
         pending = 0
 
         for i, chunk in enumerate(chunks):
-            if isinstance(chunk, dict):
-                content = str(chunk.get("content") or "").strip()
-                metadata = chunk.get("metadata") if isinstance(chunk.get("metadata"), dict) else None
-            else:
-                content = str(chunk).strip()
-                metadata = None
-
+            content = self._safe_content(chunk)
             if not content:
                 continue
+            metadata = chunk.get("metadata") if isinstance(chunk, dict) and isinstance(chunk.get("metadata"), dict) else None
 
-            doc: Dict[str, Any] = {
-                "chunk_id": str(uuid.uuid4()),
+            doc_id_val = str(uuid.uuid4())
+            doc = {
+                "chunk_id": doc_id_val,
+                "document_id": str(document_id or ""),
                 "user_id": str(user_id or session_id),
                 "session_id": str(session_id),
                 "content": content[: self.max_chunk_chars],
@@ -175,7 +97,7 @@ class RAGPipeline:
             if metadata:
                 doc["metadata"] = metadata
 
-            doc_ref = collection.document(doc["chunk_id"])
+            doc_ref = collection.document(doc_id_val)
             batch.set(doc_ref, doc)
             pending += 1
 
@@ -187,173 +109,61 @@ class RAGPipeline:
         if pending:
             batch.commit(timeout=self.firestore_timeout_s)
 
-    def _add_documents_sqlite(
-        self,
-        chunks: List[Any],
-        user_id: str,
-        session_id: str,
-        source_file: Optional[str],
-    ) -> None:
+    def _add_documents_chroma(self, chunks, user_id, session_id, source_file, document_id):
         now = datetime.now(timezone.utc).timestamp()
-        user_id_value = str(user_id or session_id)
-        session_id_value = str(session_id)
-        source_file_value = source_file or "upload"
+        
+        ids = []
+        documents = []
+        metadatas = []
 
-        rows: List[Tuple[str, str, str, str, int, str, float, Optional[str]]] = []
         for i, chunk in enumerate(chunks):
-            if isinstance(chunk, dict):
-                content = str(chunk.get("content") or "").strip()
-                metadata = chunk.get("metadata") if isinstance(chunk.get("metadata"), dict) else None
-            else:
-                content = str(chunk).strip()
-                metadata = None
-
+            content = self._safe_content(chunk)
             if not content:
                 continue
+                
+            chunk_metadata = chunk.get("metadata") if isinstance(chunk, dict) and isinstance(chunk.get("metadata"), dict) else {}
 
-            metadata_json = json.dumps(metadata) if isinstance(metadata, dict) else None
-            rows.append(
-                (
-                    str(uuid.uuid4()),
-                    user_id_value,
-                    session_id_value,
-                    content[: self.max_chunk_chars],
-                    int(i),
-                    source_file_value,
-                    float(now),
-                    metadata_json,
-                )
-            )
+            doc_id_val = str(uuid.uuid4())
+            ids.append(doc_id_val)
+            documents.append(content[: self.max_chunk_chars])
+            
+            # Chroma metadata must be flat dictionaries of str, int, float, or bool
+            meta = {
+                "document_id": str(document_id or ""),
+                "user_id": str(user_id or session_id),
+                "session_id": str(session_id),
+                "chunk_index": i,
+                "source_file": str(source_file or "upload"),
+                "created_at": float(now),
+            }
+            # Optional extra flat metadata
+            for k, v in chunk_metadata.items():
+                if isinstance(v, (str, int, float, bool)):
+                    meta[f"meta_{k}"] = v
+            metadatas.append(meta)
 
-        if not rows:
-            return
+        if ids:
+            self.collection.add(ids=ids, documents=documents, metadatas=metadatas)
 
-        with sqlite3.connect(self.local_db_path, timeout=30) as conn:
-            conn.executemany(
-                """
-                INSERT OR REPLACE INTO document_chunks
-                    (chunk_id, user_id, session_id, content, chunk_index, source_file, created_at, metadata_json)
-                VALUES
-                    (?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                rows,
-            )
-
-    def _fetch_session_docs(self, session_id: str) -> List[Dict[str, Any]]:
+    def _expand_query(self, query: str) -> List[str]:
         try:
-            if db is None:
-                return []
-
-            col = db.collection(self.collection_name)
-            docs = (
-                col.where("session_id", "==", str(session_id))
-                .limit(self.max_candidates)
-                .stream(timeout=self.firestore_timeout_s)
-            )
-            items: List[Dict[str, Any]] = []
-            for d in docs:
-                data = d.to_dict()
-                if isinstance(data, dict):
-                    items.append(data)
-            return items
-        except Exception as e:
-            logger.error("fetch session docs error: %s", e)
-            return []
-
-    def _fetch_user_fallback_docs(self, user_id: str) -> List[Dict[str, Any]]:
+            count = int(os.getenv("QUERY_EXPANSION_COUNT", "3"))
+        except Exception:
+            count = 3
+            
+        prompt = f"""
+Generate {count} alternative phrasings of the following user query, each on its own line.
+Make them semantically equivalent but phrased differently to improve search retrieval.
+Query: {query}
+"""
         try:
-            if db is None:
-                return []
-
-            col = db.collection(self.collection_name)
-            docs = (
-                col.where("user_id", "==", str(user_id))
-                .limit(self.max_candidates)
-                .stream(timeout=self.firestore_timeout_s)
-            )
-            items: List[Dict[str, Any]] = []
-            for d in docs:
-                data = d.to_dict()
-                if isinstance(data, dict):
-                    items.append(data)
-            return items
+            response = self.agent._generate(prompt)
+            alternatives = [line.strip() for line in response.splitlines() if line.strip()]
+            result = list(dict.fromkeys([query] + alternatives))
+            return result[: count + 1]
         except Exception as e:
-            logger.error("fetch user fallback docs error: %s", e)
-            return []
-
-    def _fetch_sqlite(self, session_id: str, user_id: Optional[str]) -> List[Dict[str, Any]]:
-        session_id_value = str(session_id or "").strip()
-        user_id_value = str(user_id or "").strip()
-        if not session_id_value and not user_id_value:
-            return []
-
-        try:
-            with sqlite3.connect(self.local_db_path, timeout=30) as conn:
-                conn.row_factory = sqlite3.Row
-
-                if session_id_value:
-                    cur = conn.execute(
-                        """
-                        SELECT user_id, session_id, content, chunk_index, source_file, created_at, metadata_json
-                        FROM document_chunks
-                        WHERE session_id = ?
-                        ORDER BY created_at DESC
-                        LIMIT ?
-                        """,
-                        (session_id_value, int(self.max_candidates)),
-                    )
-                else:
-                    cur = conn.execute(
-                        """
-                        SELECT user_id, session_id, content, chunk_index, source_file, created_at, metadata_json
-                        FROM document_chunks
-                        WHERE user_id = ?
-                        ORDER BY created_at DESC
-                        LIMIT ?
-                        """,
-                        (user_id_value, int(self.max_candidates)),
-                    )
-
-                items: List[Dict[str, Any]] = []
-                for row in cur.fetchall():
-                    d: Dict[str, Any] = dict(row)
-                    metadata_json = d.pop("metadata_json", None)
-                    if metadata_json:
-                        try:
-                            d["metadata"] = json.loads(metadata_json)
-                        except Exception:
-                            pass
-                    items.append(d)
-                return items
-        except Exception as e:
-            logger.error("fetch sqlite docs error: %s", e)
-            return []
-
-    def _fetch(self, session_id: str, user_id: Optional[str]) -> List[Dict[str, Any]]:
-        items: List[Dict[str, Any]] = []
-        if self.firestore_enabled:
-            items = self._fetch_session_docs(session_id)
-        if items:
-            return items
-
-        if self.firestore_enabled and user_id and str(user_id).strip() and str(user_id) == str(session_id):
-            items = self._fetch_user_fallback_docs(user_id)
-            if items:
-                return items
-
-        # Offline/local fallback
-        return self._fetch_sqlite(session_id=session_id, user_id=user_id)
-
-    def _recent_contents(self, docs: List[Dict[str, Any]], n_results: int) -> List[str]:
-        docs_sorted = sorted(docs, key=self._safe_created_at, reverse=True)
-        out: List[str] = []
-        for d in docs_sorted:
-            content = self._safe_content(d)
-            if content:
-                out.append(content)
-            if len(out) >= n_results:
-                break
-        return out
+            logger.warning(f"Query expansion failed: {e}")
+            return [query]
 
     def query(
         self,
@@ -361,75 +171,149 @@ class RAGPipeline:
         n_results: int = 5,
         user_id: Optional[str] = None,
         session_id: Optional[str] = None,
+        selected_document_ids: Optional[List[str]] = None,
     ) -> Dict[str, List[List[str]]]:
         scope_session_id = str(session_id or "").strip() or str(user_id or "").strip()
         if not scope_session_id:
             return {"documents": [[]]}
 
-        docs = self._fetch(scope_session_id, user_id=user_id)
-        if not docs:
-            return {"documents": [[]]}
+        where_clause = {"session_id": scope_session_id}
+        if selected_document_ids and len(selected_document_ids) > 0:
+            valid_docs = [str(doc_id).strip() for doc_id in selected_document_ids if str(doc_id).strip()]
+            if len(valid_docs) == 1:
+                where_clause = {"$and": [{"session_id": scope_session_id}, {"document_id": valid_docs[0]}]}
+            elif len(valid_docs) > 1:
+                where_clause = {"$and": [{"session_id": scope_session_id}, {"document_id": {"$in": valid_docs}}]}
 
+        # If no query text, return recent documents
         if not query_text or not str(query_text).strip():
-            return {"documents": [self._recent_contents(docs, n_results)]}
+            try:
+                results = self.collection.get(where=where_clause, limit=n_results)
+                docs = results.get("documents", [])
+                return {"documents": [docs[:n_results] if docs else []]}
+            except Exception as e:
+                logger.error("Failed to get recent documents: %s", e)
+                return {"documents": [[]]}
 
-        query_tokens = self._tokenize(query_text)
-        lower_query = str(query_text).lower().strip()
-
-        scored: List[Tuple[float, str]] = []
-        for d in docs:
-            content = self._safe_content(d)
-            if not content:
-                continue
-            score = self._score(query_tokens, content, lower_query=lower_query)
-            if score > 0:
-                scored.append((score, content))
-
-        if not scored:
+        # 1. Expand Query
+        expanded_queries = self._expand_query(query_text)
+        
+        # 2. Retrieve candidates from ChromaDB
+        all_candidates_dict = {}
+        try:
+            results = self.collection.query(
+                query_texts=expanded_queries,
+                n_results=min(n_results * 2, self.max_candidates),
+                where=where_clause
+            )
+            
+            # Flatten results and deduplicate by ID
+            for i in range(len(expanded_queries)):
+                if not results.get("ids") or len(results["ids"]) <= i:
+                    continue
+                for j in range(len(results["ids"][i])):
+                    doc_id = results["ids"][i][j]
+                    doc_content = results["documents"][i][j]
+                    if doc_id not in all_candidates_dict:
+                        all_candidates_dict[doc_id] = doc_content
+        except Exception as e:
+            logger.error("ChromaDB query failed: %s", e)
             return {"documents": [[]]}
 
-        scored.sort(key=lambda x: x[0], reverse=True)
-        top = [content for _, content in scored[:n_results]]
-        return {"documents": [top]}
+        candidates = list(all_candidates_dict.values())
+        if not candidates:
+            return {"documents": [[]]}
+
+        # 3. Re-rank with CrossEncoder
+        try:
+            rerank_k = int(os.getenv("RERANK_TOP_K", str(n_results)))
+        except Exception:
+            rerank_k = n_results
+
+        pairs = [(query_text, content) for content in candidates]
+        try:
+            scores = self.re_ranker.predict(pairs)
+            ranked_pairs = sorted(zip(scores, candidates), key=lambda x: x[0], reverse=True)
+            top_documents = [content for _, content in ranked_pairs[:rerank_k]]
+        except Exception as e:
+            logger.error("Re-ranking failed: %s", e)
+            top_documents = candidates[:rerank_k]
+
+        return {"documents": [top_documents]}
+
+    def list_documents(self, session_id: str) -> List[Dict[str, Any]]:
+        scope = str(session_id or "").strip()
+        if not scope:
+            return []
+
+        docs_by_id: Dict[str, Dict[str, Any]] = {}
+        
+        try:
+            results = self.collection.get(
+                where={"session_id": scope},
+                include=["metadatas"]
+            )
+            metadatas = results.get("metadatas", [])
+            
+            for meta in metadatas:
+                doc_id = meta.get("document_id")
+                if not doc_id:
+                    continue
+                
+                source = meta.get("source_file", "upload")
+                created = meta.get("created_at", 0.0)
+                
+                if doc_id not in docs_by_id:
+                    docs_by_id[doc_id] = {
+                        "id": doc_id,
+                        "name": source,
+                        "chunk_count": 1,
+                        "last_seen": float(created),
+                    }
+                else:
+                    docs_by_id[doc_id]["chunk_count"] += 1
+                    if float(created) > docs_by_id[doc_id]["last_seen"]:
+                        docs_by_id[doc_id]["last_seen"] = float(created)
+                        
+        except Exception as e:
+            logger.error("ChromaDB list_documents failed: %s", e)
+
+        return sorted(docs_by_id.values(), key=lambda x: float(x.get("last_seen") or 0), reverse=True)
+
+    def delete_document(self, session_id: str, document_id: str) -> int:
+        scope = str(session_id or "").strip()
+        doc_id = str(document_id or "").strip()
+        if not scope or not doc_id:
+            return 0
+
+        count = 0
+        try:
+            results = self.collection.get(
+                where={"$and": [{"session_id": scope}, {"document_id": doc_id}]}
+            )
+            ids_to_delete = results.get("ids", [])
+            if ids_to_delete:
+                self.collection.delete(ids=ids_to_delete)
+                count = len(ids_to_delete)
+        except Exception as e:
+            logger.error("ChromaDB delete_document failed: %s", e)
+
+        return count
 
     def clear_collection(self, session_id: Optional[str] = None) -> int:
         count = 0
-
-        if self.firestore_enabled and db is not None:
-            try:
-                col = db.collection(self.collection_name)
-                docs = (
-                    col.where("session_id", "==", str(session_id)).stream()
-                    if session_id
-                    else col.stream()
-                )
-
-                batch = db.batch()
-                for d in docs:
-                    batch.delete(d.reference)
-                    count += 1
-                    if count % 400 == 0:
-                        batch.commit()
-                        batch = db.batch()
-
-                if count % 400:
-                    batch.commit()
-            except Exception as e:
-                logger.warning("Firestore clear_collection failed; continuing with SQLite: %s", e)
-                self.firestore_enabled = False
-
-        # Always clear local fallback as well.
         try:
-            with sqlite3.connect(self.local_db_path, timeout=30) as conn:
-                if session_id:
-                    cur = conn.execute(
-                        "DELETE FROM document_chunks WHERE session_id = ?",
-                        (str(session_id),),
-                    )
-                else:
-                    cur = conn.execute("DELETE FROM document_chunks")
-                count += int(cur.rowcount or 0)
+            if session_id:
+                results = self.collection.get(where={"session_id": str(session_id)})
+                ids_to_delete = results.get("ids", [])
+                if ids_to_delete:
+                    self.collection.delete(ids=ids_to_delete)
+                    count = len(ids_to_delete)
+            else:
+                count = self.collection.count()
+                self.chroma_client.delete_collection(self.collection_name)
+                self.collection = self.chroma_client.create_collection(name=self.collection_name)
         except Exception as e:
-            logger.error("SQLite clear_collection failed: %s", e)
+            logger.error("ChromaDB clear_collection failed: %s", e)
 
         return count

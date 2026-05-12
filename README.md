@@ -19,18 +19,19 @@ GEMINI_API_KEY=your_actual_api_key_here
 ## 4. Run the Backend
 From the root directory, start the FastAPI server:
 ```bash
-uvicorn backend.main:app --reload
+uvicorn backend.main:app --reload --port 8000
 ```
 This will start the backend at `http://localhost:8000`.
 
 ## 5. Run the Frontend
-You can simply open `frontend/index.html` in your web browser. 
-If you want to use a local server:
+From the `frontend` folder, start a local static server:
 ```bash
 cd frontend
 python -m http.server 3000
 ```
 Then visit `http://localhost:3000` in your browser.
+
+> Make sure the backend runs on `http://localhost:8000` and the frontend runs on `http://localhost:3000`.
 
 ## Features
 - **Upload PDF:** Drag and drop your PDF file to extract text and generate embeddings.
