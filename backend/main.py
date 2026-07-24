@@ -3,13 +3,12 @@ import io
 import time
 import json
 import logging
-import threading
 import uuid
 from typing import List, Dict, Any
 
-from fastapi import FastAPI, UploadFile, File, Request, BackgroundTasks
+from fastapi import FastAPI, UploadFile, File, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from slowapi import Limiter
@@ -100,24 +99,6 @@ agent = AIAgent()
 # ---------------- MEMORY ----------------
 chat_memory: Dict[str, List[Dict[str, str]]] = {}
 
-# ---------------- UPLOAD JOBS ----------------
-upload_jobs: Dict[str, Dict[str, Any]] = {}
-upload_jobs_lock = threading.Lock()
-
-
-def _update_upload_job(job_id: str, **updates: Any) -> Dict[str, Any]:
-    with upload_jobs_lock:
-        job = upload_jobs.setdefault(job_id, {})
-        job.update(updates)
-        job["updated_at"] = time.time()
-        return dict(job)
-
-
-def _get_upload_job(job_id: str) -> Dict[str, Any] | None:
-    with upload_jobs_lock:
-        job = upload_jobs.get(job_id)
-        return dict(job) if job else None
-
 # ---------------- SPAM PROTECTION ----------------
 last_request_time: Dict[str, float] = {}
 
@@ -196,121 +177,11 @@ def is_agent_auth_error(response_payload: Any) -> bool:
 
     return str(parsed.get("code") or "").lower() == "auth_error"
 
-
-def _store_chat_turn(session_id: str, query: str, response: str) -> None:
-    history = chat_memory.get(session_id, [])
-    history.append({"role": "user", "content": query})
-    history.append({"role": "assistant", "content": response})
-    chat_memory[session_id] = history[-10:]
-
-
-async def _process_upload_job(
-    job_id: str,
-    session_id: str,
-    files_payload: List[Dict[str, Any]],
-) -> None:
-    try:
-        total_chunks = 0
-        uploaded_documents: List[Dict[str, Any]] = []
-
-        _update_upload_job(
-            job_id,
-            status="processing",
-            message="Processing uploaded files...",
-            processed_files=0,
-            total_files=len(files_payload),
-        )
-
-        for file_index, file_payload in enumerate(files_payload, start=1):
-            filename = str(file_payload.get("filename") or "upload")
-            file_bytes = file_payload.get("bytes") or b""
-
-            if not filename or not is_valid_file(filename):
-                raise ValueError(f"Invalid file: {filename}")
-
-            if len(file_bytes) > MAX_FILE_SIZE_BYTES:
-                raise ValueError(f"File too large: {filename}")
-
-            _update_upload_job(
-                job_id,
-                message=f"Processing {file_index}/{len(files_payload)}: {filename}",
-                processed_files=file_index - 1,
-            )
-
-            document_id = str(uuid.uuid4())
-
-            try:
-                text = extract_text_from_file(filename, io.BytesIO(file_bytes))
-            except Exception as e:
-                logger.exception("Text extraction failed")
-                raise RuntimeError(f"Failed to extract text from {filename}: {str(e)}") from e
-
-            if not text:
-                raise RuntimeError(f"No text could be extracted from {filename}")
-
-            remaining = max(0, MAX_CHUNKS_PER_UPLOAD - total_chunks)
-            if remaining == 0:
-                raise RuntimeError("Too many chunks")
-
-            try:
-                chunks = chunk_text(text, max_chunks=remaining)
-            except Exception as e:
-                logger.exception("Chunking failed")
-                raise RuntimeError(f"Failed to chunk text from {filename}: {str(e)}") from e
-
-            if isinstance(chunks, list) and chunks:
-                total_chunks += len(chunks)
-                rag.add_documents(
-                    chunks,
-                    user_id=session_id,
-                    session_id=session_id,
-                    source_file=filename or "upload",
-                    document_id=document_id,
-                )
-                uploaded_documents.append(
-                    {
-                        "id": document_id,
-                        "name": filename or "upload",
-                        "chunk_count": len(chunks),
-                        "size_bytes": len(file_bytes),
-                    }
-                )
-
-            _update_upload_job(
-                job_id,
-                processed_files=file_index,
-                chunks_created=total_chunks,
-                documents=uploaded_documents,
-            )
-
-        _update_upload_job(
-            job_id,
-            status="completed",
-            message="Upload processed successfully",
-            chunks_created=total_chunks,
-            documents=uploaded_documents,
-            result={
-                "status": "success",
-                "files_received": len(files_payload),
-                "chunks_created": total_chunks,
-                "documents": uploaded_documents,
-            },
-        )
-    except Exception as exc:
-        logger.exception("Upload job failed")
-        _update_upload_job(
-            job_id,
-            status="failed",
-            message=str(exc) or "Upload failed",
-            error=str(exc) or "Upload failed",
-        )
-
 # ---------------- UPLOAD ----------------
 @app.post("/upload")
 @limiter.limit("10/minute")
 async def upload_files(
     request: Request,
-    background_tasks: BackgroundTasks,
     files: List[UploadFile] = File(default=[]),
     file: UploadFile | None = File(default=None),
 ):
@@ -335,7 +206,8 @@ async def upload_files(
                 content={"status": "error", "message": "Missing session id (send x-user-id header)"},
             )
 
-        files_payload: List[Dict[str, Any]] = []
+        total_chunks = 0
+        uploaded_documents: List[Dict[str, Any]] = []
 
         for file in files:
             if not file.filename or not is_valid_file(file.filename):
@@ -352,39 +224,82 @@ async def upload_files(
                     content={"status": "error", "message": "File too large"},
                 )
 
-            files_payload.append(
-                {
-                    "filename": file.filename,
-                    "bytes": file_bytes,
-                    "size_bytes": len(file_bytes),
-                }
-            )
+            document_id = str(uuid.uuid4())
+            try:
+                text = extract_text_from_file(file.filename, io.BytesIO(file_bytes))
+            except Exception as e:
+                logger.exception("Text extraction failed")
+                return JSONResponse(
+                    status_code=500,
+                    content={"status": "error", "message": f"Failed to extract text from {file.filename}: {str(e)}"},
+                )
 
-        job_id = str(uuid.uuid4())
-        _update_upload_job(
-            job_id,
-            job_id=job_id,
-            status="queued",
-            message="Upload queued",
-            session_id=session_id,
-            processed_files=0,
-            total_files=len(files_payload),
-            chunks_created=0,
-            documents=[],
-        )
-        background_tasks.add_task(_process_upload_job, job_id, session_id, files_payload)
+            if not text:
+                return JSONResponse(
+                    status_code=400,
+                    content={"status": "error", "message": f"No text could be extracted from {file.filename}"},
+                )
 
-        logger.info(f"{ip} queued {len(files_payload)} files for background processing")
+            remaining = max(0, MAX_CHUNKS_PER_UPLOAD - total_chunks)
+            if remaining == 0:
+                return JSONResponse(
+                    status_code=400,
+                    content={"status": "error", "message": "Too many chunks"},
+                )
 
-        return JSONResponse(
-            status_code=202,
-            content={
-                "status": "queued",
-                "job_id": job_id,
-                "message": "Upload queued for background processing",
-                "files_received": len(files_payload),
-            },
-        )
+            try:
+                chunks = chunk_text(text, max_chunks=remaining)
+            except Exception as e:
+                logger.exception("Chunking failed")
+                return JSONResponse(
+                    status_code=500,
+                    content={"status": "error", "message": f"Failed to chunk text from {file.filename}: {str(e)}"},
+                )
+
+            if isinstance(chunks, list):
+                total_chunks += len(chunks)
+
+                if total_chunks > MAX_CHUNKS_PER_UPLOAD:
+                    return JSONResponse(
+                        status_code=400,
+                        content={"status": "error", "message": "Too many chunks"},
+                    )
+
+                if chunks:
+                    try:
+                        rag.add_documents(
+                            chunks,
+                            user_id=session_id,
+                            session_id=session_id,
+                            source_file=file.filename or "upload",
+                            document_id=document_id,
+                        )
+                        uploaded_documents.append(
+                            {
+                                "id": document_id,
+                                "name": file.filename or "upload",
+                                "chunk_count": len(chunks),
+                                "size_bytes": len(file_bytes),
+                            }
+                        )
+                    except Exception as e:
+                        logger.exception("Document store write failed")
+                        return JSONResponse(
+                            status_code=500,
+                            content={
+                                "status": "error",
+                                "message": f"Failed to store documents: {str(e) or 'unknown error'}",
+                            },
+                        )
+
+        logger.info(f"{ip} uploaded {len(files)} files -> {total_chunks} chunks")
+
+        return {
+            "status": "success",
+            "files_received": len(files),
+            "chunks_created": total_chunks,
+            "documents": uploaded_documents,
+        }
 
     except Exception:
         logger.exception("Upload failed")
@@ -392,29 +307,6 @@ async def upload_files(
             status_code=500,
             content={"status": "error", "message": "Upload failed"},
         )
-
-
-@app.get("/upload-jobs/{job_id}")
-@limiter.limit("30/minute")
-async def get_upload_job_status(job_id: str, request: Request):
-    session_id = get_session_id(request)
-    if not session_id:
-        return JSONResponse(
-            status_code=400,
-            content={"status": "error", "message": "Missing session id (send x-user-id header)"},
-        )
-
-    job = _get_upload_job(job_id)
-    if not job or str(job.get("session_id") or "") != session_id:
-        return JSONResponse(
-            status_code=404,
-            content={"status": "error", "message": "Upload job not found"},
-        )
-
-    return {
-        "status": "success",
-        "job": job,
-    }
 
 # ---------------- QUERY ----------------
 @app.post("/query")
@@ -533,118 +425,6 @@ async def query(req: QueryRequest, request: Request):
 
     except Exception:
         logger.exception("Query failed")
-        return JSONResponse(
-            status_code=500,
-            content={"status": "error", "message": "Query failed"},
-        )
-
-
-@app.post("/query/stream")
-@limiter.limit("5/minute")
-async def query_stream(req: QueryRequest, request: Request):
-    try:
-        ip = request.client.host if request.client else "unknown"
-
-        if is_spamming(ip):
-            return JSONResponse(status_code=429, content={"status": "error", "message": "Too fast"})
-
-        if not req.query.strip():
-            return JSONResponse(status_code=400, content={"status": "error", "message": "Empty query"})
-
-        if len(req.query) > MAX_QUERY_LENGTH:
-            return JSONResponse(status_code=400, content={"status": "error", "message": "Query too long"})
-
-        session_id = get_session_id(request)
-        if not session_id:
-            return JSONResponse(
-                status_code=400,
-                content={"status": "error", "message": "Missing session id (send x-user-id header)"},
-            )
-
-        selected_document_ids = [str(doc_id).strip() for doc_id in (req.selected_document_ids or []) if str(doc_id).strip()]
-        if not selected_document_ids:
-            return JSONResponse(
-                status_code=400,
-                content={"status": "error", "message": "Please select at least one document to generate an answer."},
-            )
-
-        api_key_override = get_bearer_api_key(request)
-
-        try:
-            results = rag.query(
-                req.query,
-                n_results=MAX_RAG_RESULTS,
-                user_id=session_id,
-                session_id=session_id,
-                selected_document_ids=selected_document_ids,
-            )
-        except Exception as e:
-            logger.exception("RAG query failed")
-            return JSONResponse(
-                status_code=500,
-                content={"status": "error", "message": f"RAG query failed: {str(e) or 'unknown error'}"},
-            )
-
-        documents = results.get("documents") or [[]]
-        docs = documents[0] if isinstance(documents, list) and documents else []
-        if not isinstance(docs, list):
-            docs = []
-
-        context = "\n\n".join([str(d).strip() for d in docs if str(d).strip()])
-
-        if not context:
-            return JSONResponse(
-                status_code=400,
-                content={"status": "error", "message": "No relevant content found in the selected documents."},
-            )
-
-        if req.mode == "quiz":
-            response = agent.generate_quiz(
-                context,
-                int(req.options.get("num_questions", 5) or 5),
-                user_id=session_id,
-                api_key_override=api_key_override,
-            )
-            if is_agent_auth_error(response):
-                return JSONResponse(
-                    status_code=401,
-                    content={"status": "error", "code": "auth_error", "message": "API key authentication failed"},
-                )
-            return JSONResponse(status_code=200, content={"status": "success", "response": response})
-
-        async def response_stream():
-            collected: List[str] = []
-            try:
-                for chunk in agent.stream_answer(
-                    req.mode,
-                    req.query,
-                    context,
-                    user_id=session_id,
-                    api_key_override=api_key_override,
-                ):
-                    collected.append(chunk)
-                    yield chunk
-            except Exception as e:
-                logger.exception("Streamed query failed")
-                error_text = f"\n\nServer error: {str(e) or 'Something went wrong.'}"
-                collected.append(error_text)
-                yield error_text
-            finally:
-                response_text = "".join(collected).strip()
-                if response_text:
-                    _store_chat_turn(session_id, req.query, response_text)
-
-        return StreamingResponse(
-            response_stream(),
-            media_type="text/plain; charset=utf-8",
-            headers={
-                "Cache-Control": "no-cache",
-                "X-Accel-Buffering": "no",
-            },
-        )
-
-    except Exception:
-        logger.exception("Streamed query failed")
         return JSONResponse(
             status_code=500,
             content={"status": "error", "message": "Query failed"},

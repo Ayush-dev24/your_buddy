@@ -397,66 +397,6 @@ function updateStatusIndicator() {
   statusIndicator.style.color = "";
 }
 
-function sleep(ms) {
-  return new Promise((resolve) => window.setTimeout(resolve, ms));
-}
-
-function setUploadStatusMessage(message) {
-  if (!uploadStatus) return;
-  const label = uploadStatus.querySelector("span");
-  if (label) label.textContent = String(message || "");
-}
-
-function formatBotMessageHtml(text) {
-  const safeText = String(text || "");
-  let formattedText = `<p>${escapeHtml(safeText)}</p>`;
-  if (typeof marked !== "undefined") {
-    try {
-      if (typeof marked.parse === "function") {
-        formattedText = marked.parse(safeText);
-      } else if (typeof marked === "function") {
-        formattedText = marked(safeText);
-      }
-    } catch {
-      formattedText = `<p>${escapeHtml(safeText)}</p>`;
-    }
-  }
-  return formattedText;
-}
-
-function createStreamingMessage() {
-  const div = document.createElement("div");
-  div.className = "message bot-message streaming-message";
-  div.innerHTML = `
-    <div class="avatar"><i class="fas fa-robot"></i></div>
-    <div class="content streaming-content">
-      <span class="streaming-text"></span>
-      <span class="streaming-cursor">▍</span>
-    </div>
-  `;
-  chatHistory.appendChild(div);
-  scrollToBottom();
-
-  return {
-    root: div,
-    textEl: div.querySelector(".streaming-text"),
-    cursorEl: div.querySelector(".streaming-cursor"),
-    contentEl: div.querySelector(".streaming-content"),
-  };
-}
-
-function updateStreamingMessage(messageNode, text) {
-  if (!messageNode || !messageNode.textEl) return;
-  messageNode.textEl.textContent = String(text || "");
-  scrollToBottom();
-}
-
-function finalizeStreamingMessage(messageNode, text) {
-  if (!messageNode || !messageNode.contentEl) return;
-  messageNode.contentEl.innerHTML = formatBotMessageHtml(String(text || ""));
-  scrollToBottom();
-}
-
 // --- Upload / Query Functions ---
 function handleFileSelection() {
   selectedFiles = Array.from((fileUpload && fileUpload.files) || []);
@@ -524,7 +464,6 @@ async function uploadSelectedFiles() {
 
   if (dropArea) dropArea.classList.add("hidden");
   if (uploadStatus) uploadStatus.classList.remove("hidden");
-  setUploadStatusMessage("Sending files to the server...");
 
   const formData = new FormData();
   selectedFiles.forEach((file) => formData.append("files", file));
@@ -543,13 +482,8 @@ async function uploadSelectedFiles() {
       throw new Error(request.message || "Upload failed");
     }
 
-    let result = request.body || {};
-
-    if (result.status === "queued" && result.job_id) {
-      setUploadStatusMessage("Processing files in the background...");
-      const job = await pollUploadJob(result.job_id);
-      result = job.result || {};
-    }
+    const result = request.body || {};
+    if (uploadStatus) uploadStatus.classList.add("hidden");
 
     selectedFiles = [];
     if (fileUpload) fileUpload.value = "";
@@ -576,38 +510,8 @@ async function uploadSelectedFiles() {
     );
   } catch (error) {
     alert(`Error uploading files: ${error.message || "Upload failed"}`);
-    setUploadStatusMessage("Upload failed.");
-    if (dropArea) dropArea.classList.remove("hidden");
-  } finally {
     if (uploadStatus) uploadStatus.classList.add("hidden");
-  }
-}
-
-async function pollUploadJob(jobId) {
-  while (true) {
-    const request = await sendApiRequestWithFallback(
-      `/upload-jobs/${encodeURIComponent(String(jobId))}`,
-      { method: "GET" },
-      { aiRequest: false }
-    );
-
-    if (!request.ok) {
-      throw new Error(request.message || "Failed to fetch upload status");
-    }
-
-    const job = request.body?.job || {};
-    const status = String(job.status || "").toLowerCase();
-
-    if (status === "completed") {
-      return job;
-    }
-
-    if (status === "failed") {
-      throw new Error(job.error || job.message || "Upload failed");
-    }
-
-    setUploadStatusMessage(job.message || "Processing files...");
-    await sleep(1000);
+    if (dropArea) dropArea.classList.remove("hidden");
   }
 }
 
@@ -626,43 +530,47 @@ async function processUserQuery(query) {
 
   isProcessing = true;
   sendBtn.disabled = true;
+  const loadingId = appendLoadingMessage();
 
   try {
-    if (currentMode === "quiz") {
-      const request = await sendApiRequestWithFallback(
-        "/query",
-        {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({
-            query,
-            mode: currentMode,
-            selected_document_ids: Array.from(activeDocumentIds),
-          }),
+    const request = await sendApiRequestWithFallback(
+      "/query",
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
         },
-        { aiRequest: true }
+        body: JSON.stringify({
+          query,
+          mode: currentMode,
+          selected_document_ids: Array.from(activeDocumentIds),
+        }),
+      },
+      { aiRequest: true }
+    );
+
+    removeLoadingMessage(loadingId);
+
+    if (request.authError && aiResponsesDisabled) {
+      appendBotMessage(
+        "API key authentication failed. Fallback mode is active and AI responses are disabled."
       );
+      return;
+    }
 
-      if (request.authError && aiResponsesDisabled) {
-        appendBotMessage(
-          "API key authentication failed. Fallback mode is active and AI responses are disabled."
-        );
-        return;
-      }
+    if (!request.ok) {
+      throw new Error(request.message || "Failed to process query");
+    }
 
-      if (!request.ok) {
-        throw new Error(request.message || "Failed to process query");
-      }
+    const result = request.body || {};
+    if (result.status === "error") {
+      appendBotMessage(result.message || "Something went wrong.");
+      return;
+    }
 
-      const result = request.body || {};
-      if (result.status === "error") {
-        appendBotMessage(result.message || "Something went wrong.");
-        return;
-      }
+    const payload = result.response;
 
-      const payload = result.response;
+    if (currentMode === "quiz") {
       const quizData = parseQuizResponse(payload);
       if (Array.isArray(quizData)) {
         renderInteractiveQuiz(quizData);
@@ -670,148 +578,16 @@ async function processUserQuery(query) {
         appendBotMessage("Server returned invalid quiz format.\n\n" + String(payload || ""));
       }
     } else {
-      const streamingMessage = createStreamingMessage();
-      const request = await streamChatResponse(
-        "/query/stream",
-        {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({
-            query,
-            mode: currentMode,
-            selected_document_ids: Array.from(activeDocumentIds),
-          }),
-        },
-        streamingMessage
-      );
-
-      if (request.authError && aiResponsesDisabled) {
-        appendBotMessage(
-          "API key authentication failed. Fallback mode is active and AI responses are disabled."
-        );
-        return;
-      }
-
-      if (!request.ok) {
-        throw new Error(request.message || "Failed to process query");
-      }
-
-      finalizeStreamingMessage(streamingMessage, request.bodyText || "No response received.");
+      appendBotMessage(String(payload || "No response received."));
     }
   } catch (error) {
+    removeLoadingMessage(loadingId);
     appendBotMessage("Server error:\n\n" + (error.message || "Something went wrong."));
   } finally {
     isProcessing = false;
     sendBtn.disabled = false;
     userInput.focus();
   }
-}
-
-async function streamChatResponse(path, init, streamingMessage) {
-  const primaryKey = resolvePrimaryApiKey();
-  const first = await streamChatRequest(path, init, primaryKey, streamingMessage);
-  if (!first.authError) return first;
-
-  alert("API key failed. Switching to fallback mode.");
-  showToast("API key failed. Trying default fallback key.", "warning");
-
-  const second = await streamChatRequest(path, init, DEFAULT_API_KEY, streamingMessage);
-  if (second.authError) {
-    enableAiFallbackMode();
-  }
-  return second;
-}
-
-async function streamChatRequest(path, init, apiKey, streamingMessage) {
-  let response;
-  try {
-    response = await fetch(`${API_URL}${path}`, {
-      ...init,
-      headers: buildRequestHeaders(init.headers, apiKey),
-    });
-  } catch {
-    return {
-      ok: false,
-      authError: false,
-      message: "Network issue. Please check connection and try again.",
-      bodyText: "",
-      response: null,
-    };
-  }
-
-  if (!response.ok) {
-    let parsedBody = null;
-    let rawText = "";
-    try {
-      parsedBody = await response.json();
-    } catch {
-      try {
-        rawText = await response.text();
-      } catch {
-        rawText = "";
-      }
-    }
-
-    const message =
-      (parsedBody && (parsedBody.message || parsedBody.detail)) ||
-      rawText ||
-      `Request failed (${response.status})`;
-
-    return {
-      ok: false,
-      authError: looksLikeAuthError(response, parsedBody, message),
-      message,
-      bodyText: "",
-      response,
-    };
-  }
-
-  if (!response.body) {
-    const text = await response.text();
-    updateStreamingMessage(streamingMessage, text);
-    return {
-      ok: true,
-      authError: false,
-      message: "",
-      bodyText: text,
-      response,
-    };
-  }
-
-  const reader = response.body.getReader();
-  const decoder = new TextDecoder();
-  let fullText = "";
-
-  try {
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-
-      const chunk = decoder.decode(value, { stream: true });
-      if (chunk) {
-        fullText += chunk;
-        updateStreamingMessage(streamingMessage, fullText);
-      }
-    }
-  } catch (error) {
-    return {
-      ok: false,
-      authError: false,
-      message: error.message || "Streaming response interrupted",
-      bodyText: fullText,
-      response,
-    };
-  }
-
-  return {
-    ok: true,
-    authError: false,
-    message: "",
-    bodyText: fullText,
-    response,
-  };
 }
 
 function parseQuizResponse(payload) {
