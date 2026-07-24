@@ -107,8 +107,12 @@ class AIAgent:
         self.persist_enabled = _first_env("ENABLE_FIRESTORE_STORAGE", default="1") != "0"
         self.model_candidates = _dedupe_keep_order(
             [
+                "gemini-3.6-flash",
+                "gemini-flash-latest",
                 "gemini-2.5-flash",
                 "gemini-2.5-pro",
+                "gemini-1.5-flash",
+                "gemini-1.5-pro",
                 _first_env("GEMINI_MODEL"),
             ]
         )
@@ -247,7 +251,7 @@ class AIAgent:
                             ensure_ascii=False,
                         )
 
-                    return "Something went wrong. Please try again."
+                    return "AI returned an empty response. Try a different prompt or model."
 
                 except Exception as e:
                     last_error = e
@@ -283,12 +287,12 @@ class AIAgent:
                 return json.dumps(
                     {
                         "status": "error",
-                        "message": str(last_error),
+                        "message": str(last_error) or "Gemini generation failed",
                     },
                     ensure_ascii=False,
                 )
 
-            return "Something went wrong. Please try again."
+            return f"Gemini generation failed: {str(last_error) or 'unknown error'}"
 
         if expect_json:
             return json.dumps(
@@ -299,7 +303,7 @@ class AIAgent:
                 ensure_ascii=False,
             )
 
-        return "Something went wrong. Please try again."
+        return "AI returned an empty response. Try a different prompt or model."
 
     def ask_question(
         self,
