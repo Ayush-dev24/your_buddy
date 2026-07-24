@@ -5,8 +5,8 @@ WORKDIR /app
 # Copy project first (better caching behavior)
 COPY . .
 
-# Install dependencies
-RUN pip install --no-cache-dir -r requirements.txt
+# Install backend dependencies
+RUN pip install --no-cache-dir -r backend/requirements.txt
 
 # Render exposes PORT dynamically
 EXPOSE 10000

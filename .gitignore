@@ -6,6 +6,7 @@ backend/serviceAccountKey.json
 serviceAccountKey.json
 *serviceAccount*.json
 __pycache__/
+backend/__pycache__/
 *.py[cod]
 *.sqlite3
 *.7z
