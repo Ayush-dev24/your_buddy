@@ -63,6 +63,11 @@ class RAGPipeline:
             return str(doc.get("content") or "").strip()
         return str(doc).strip()
 
+    def _firestore_user_documents(self, user_key: str):
+        if db is None:
+            raise RuntimeError("Firestore client not initialized")
+        return db.collection("users").document(user_key).collection("documents")
+
     def add_documents(
         self,
         chunks: List[Any],
@@ -88,9 +93,15 @@ class RAGPipeline:
     def _add_documents_firestore(self, chunks, user_id, session_id, source_file, document_id):
         if db is None:
             raise RuntimeError("Firestore client not initialized")
-        collection = db.collection(self.collection_name)
+        user_key = str(user_id or session_id or "").strip()
+        if not user_key:
+            raise RuntimeError("Missing Firestore user key")
+
+        doc_id = str(document_id or uuid.uuid4())
+        document_ref = self._firestore_user_documents(user_key).document(doc_id)
+        chunk_collection = document_ref.collection("chunks")
         batch = db.batch()
-        pending = 0
+        stored_chunks = []
 
         for i, chunk in enumerate(chunks):
             content = self._safe_content(chunk)
@@ -99,10 +110,10 @@ class RAGPipeline:
             metadata = chunk.get("metadata") if isinstance(chunk, dict) and isinstance(chunk.get("metadata"), dict) else None
 
             doc_id_val = str(uuid.uuid4())
-            doc = {
+            chunk_doc = {
                 "chunk_id": doc_id_val,
-                "document_id": str(document_id or ""),
-                "user_id": str(user_id or session_id),
+                "document_id": doc_id,
+                "user_id": user_key,
                 "session_id": str(session_id),
                 "content": content[: self.max_chunk_chars],
                 "chunk_index": i,
@@ -110,19 +121,25 @@ class RAGPipeline:
                 "created_at": datetime.now(timezone.utc),
             }
             if metadata:
-                doc["metadata"] = metadata
+                chunk_doc["metadata"] = metadata
 
-            doc_ref = collection.document(doc_id_val)
-            batch.set(doc_ref, doc)
-            pending += 1
+            stored_chunks.append(chunk_doc)
+            batch.set(chunk_collection.document(doc_id_val), chunk_doc)
 
-            if pending >= 400:
-                batch.commit(timeout=self.firestore_timeout_s)
-                batch = db.batch()
-                pending = 0
+        if not stored_chunks:
+            return
 
-        if pending:
-            batch.commit(timeout=self.firestore_timeout_s)
+        parent_doc = {
+            "document_id": doc_id,
+            "user_id": user_key,
+            "session_id": str(session_id),
+            "source_file": source_file or "upload",
+            "chunk_count": len(stored_chunks),
+            "created_at": datetime.now(timezone.utc),
+            "updated_at": datetime.now(timezone.utc),
+        }
+        batch.set(document_ref, parent_doc, merge=True)
+        batch.commit(timeout=self.firestore_timeout_s)
 
     def _add_documents_chroma(self, chunks, user_id, session_id, source_file, document_id):
         now = datetime.now(timezone.utc).timestamp()
@@ -264,6 +281,32 @@ Query: {query}
         if not scope:
             return []
 
+        if self.firestore_enabled:
+            try:
+                docs_ref = self._firestore_user_documents(scope)
+                docs_by_id: Dict[str, Dict[str, Any]] = {}
+
+                for snap in docs_ref.stream():
+                    data = snap.to_dict() or {}
+                    doc_id = str(data.get("document_id") or snap.id).strip()
+                    if not doc_id:
+                        continue
+
+                    created = data.get("created_at", 0.0)
+                    chunk_count = int(data.get("chunk_count") or 0)
+                    source = data.get("source_file", "upload")
+
+                    docs_by_id[doc_id] = {
+                        "id": doc_id,
+                        "name": source,
+                        "chunk_count": chunk_count,
+                        "last_seen": float(created.timestamp() if hasattr(created, "timestamp") else created or 0.0),
+                    }
+
+                return sorted(docs_by_id.values(), key=lambda x: float(x.get("last_seen") or 0), reverse=True)
+            except Exception as e:
+                logger.error("Firestore list_documents failed: %s", e)
+
         docs_by_id: Dict[str, Dict[str, Any]] = {}
         
         try:
@@ -303,6 +346,28 @@ Query: {query}
         doc_id = str(document_id or "").strip()
         if not scope or not doc_id:
             return 0
+
+        if self.firestore_enabled:
+            try:
+                document_ref = self._firestore_user_documents(scope).document(doc_id)
+                chunks_ref = document_ref.collection("chunks")
+                chunk_snaps = list(chunks_ref.stream())
+                if chunk_snaps:
+                    batch = db.batch()
+                    pending = 0
+                    for snap in chunk_snaps:
+                        batch.delete(snap.reference)
+                        pending += 1
+                        if pending >= 400:
+                            batch.commit(timeout=self.firestore_timeout_s)
+                            batch = db.batch()
+                            pending = 0
+                    if pending:
+                        batch.commit(timeout=self.firestore_timeout_s)
+                document_ref.delete()
+                return len(chunk_snaps)
+            except Exception as e:
+                logger.error("Firestore delete_document failed: %s", e)
 
         count = 0
         try:
