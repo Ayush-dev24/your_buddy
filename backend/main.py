@@ -1,6 +1,5 @@
 import os
 import io
-import asyncio
 import time
 import json
 import logging
@@ -8,7 +7,7 @@ import threading
 import uuid
 from typing import List, Dict, Any
 
-from fastapi import FastAPI, UploadFile, File, Request
+from fastapi import FastAPI, UploadFile, File, Request, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
@@ -311,6 +310,7 @@ async def _process_upload_job(
 @limiter.limit("10/minute")
 async def upload_files(
     request: Request,
+    background_tasks: BackgroundTasks,
     files: List[UploadFile] = File(default=[]),
     file: UploadFile | None = File(default=None),
 ):
@@ -372,10 +372,7 @@ async def upload_files(
             chunks_created=0,
             documents=[],
         )
-        threading.Thread(
-            target=lambda: asyncio.run(_process_upload_job(job_id, session_id, files_payload)),
-            daemon=True,
-        ).start()
+        background_tasks.add_task(_process_upload_job, job_id, session_id, files_payload)
 
         logger.info(f"{ip} queued {len(files_payload)} files for background processing")
 
