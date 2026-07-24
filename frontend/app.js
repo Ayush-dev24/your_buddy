@@ -1,7 +1,7 @@
 const API_URL =
   window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1"
     ? "http://127.0.0.1:8000"
-    : "https://your-buddy-dev.onrender.com";
+    : "https://your-buddy-us.onrender.com";
 
 const API_KEY_STORAGE_KEY = "api_key";
 const SESSION_ID_STORAGE_KEY = "client_session_id";
