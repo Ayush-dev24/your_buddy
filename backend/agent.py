@@ -14,10 +14,10 @@ from google.genai import types
 # If backend/firebase_config.py exists and exposes `db`, the agent will store
 # chats/quizzes there. If not, the app still runs normally.
 try:
-    try:
+    if __package__:
+        from .firebase_config import db as firestore_db  # type: ignore
+    else:
         from backend.firebase_config import db as firestore_db  # type: ignore
-    except ImportError:
-        from firebase_config import db as firestore_db  # type: ignore
 except Exception:
     firestore_db = None
 

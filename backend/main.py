@@ -15,14 +15,14 @@ from slowapi import Limiter
 from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
 
-try:
+if __package__:
+    from .utils import extract_text_from_file, chunk_text
+    from .rag_pipeline import RAGPipeline
+    from .agent import AIAgent
+else:
     from backend.utils import extract_text_from_file, chunk_text
     from backend.rag_pipeline import RAGPipeline
     from backend.agent import AIAgent
-except ImportError:
-    from utils import extract_text_from_file, chunk_text
-    from rag_pipeline import RAGPipeline
-    from agent import AIAgent
 
 # ---------------- LOGGING ----------------
 logging.basicConfig(

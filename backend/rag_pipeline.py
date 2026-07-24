@@ -6,14 +6,18 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 import chromadb
-from sentence_transformers import CrossEncoder
 
 try:
-    from backend.firebase_config import db
-except ImportError:
-    from firebase_config import db
+    from sentence_transformers import CrossEncoder
+except Exception:
+    CrossEncoder = None
 
-from backend.agent import AIAgent
+if __package__:
+    from .firebase_config import db
+    from .agent import AIAgent
+else:
+    from backend.firebase_config import db
+    from backend.agent import AIAgent
 
 logger = logging.getLogger(__name__)
 
@@ -30,9 +34,20 @@ class RAGPipeline:
 
         self.agent = AIAgent()
         
-        # Load Sentence-Transformer for Re-ranking
-        logger.info("Loading CrossEncoder model...")
-        self.re_ranker = CrossEncoder('cross-encoder/ms-marco-MiniLM-L-6-v2')
+        # Load Sentence-Transformer for re-ranking when available.
+        self.re_ranker = None
+        self.re_ranker_enabled = True
+        if CrossEncoder is None:
+            self.re_ranker_enabled = False
+            logger.warning("sentence-transformers is unavailable; using retrieval order only.")
+        else:
+            try:
+                logger.info("Loading CrossEncoder model...")
+                self.re_ranker = CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2")
+            except Exception as exc:
+                self.re_ranker_enabled = False
+                self.re_ranker = None
+                logger.warning("CrossEncoder unavailable; using retrieval order only: %s", exc)
         
         # Initialize ChromaDB
         chroma_db_path = os.getenv(
@@ -231,12 +246,15 @@ Query: {query}
             rerank_k = n_results
 
         pairs = [(query_text, content) for content in candidates]
-        try:
-            scores = self.re_ranker.predict(pairs)
-            ranked_pairs = sorted(zip(scores, candidates), key=lambda x: x[0], reverse=True)
-            top_documents = [content for _, content in ranked_pairs[:rerank_k]]
-        except Exception as e:
-            logger.error("Re-ranking failed: %s", e)
+        if self.re_ranker is not None:
+            try:
+                scores = self.re_ranker.predict(pairs)
+                ranked_pairs = sorted(zip(scores, candidates), key=lambda x: x[0], reverse=True)
+                top_documents = [content for _, content in ranked_pairs[:rerank_k]]
+            except Exception as e:
+                logger.error("Re-ranking failed: %s", e)
+                top_documents = candidates[:rerank_k]
+        else:
             top_documents = candidates[:rerank_k]
 
         return {"documents": [top_documents]}
