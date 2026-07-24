@@ -107,12 +107,7 @@ class AIAgent:
         self.persist_enabled = _first_env("ENABLE_FIRESTORE_STORAGE", default="1") != "0"
         self.model_candidates = _dedupe_keep_order(
             [
-                "gemini-3.6-flash",
-                "gemini-flash-latest",
                 "gemini-2.5-flash",
-                "gemini-2.5-pro",
-                "gemini-1.5-flash",
-                "gemini-1.5-pro",
                 _first_env("GEMINI_MODEL"),
             ]
         )
