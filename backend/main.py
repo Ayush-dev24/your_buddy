@@ -77,6 +77,7 @@ default_cors_origins = [
     "http://localhost:3000",
     "http://127.0.0.1:3000",
     "https://your-buddy-phi.vercel.app",
+    "https://your-buddy-frontend.onrender.com",
 ]
 
 configured_cors_origins = _parse_cors_origins()
