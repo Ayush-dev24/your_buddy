@@ -42,6 +42,7 @@ const activeDocsSummary = document.getElementById("activeDocsSummary");
 
 const sidebar = document.getElementById("sidebar");
 const sidebarToggle = document.getElementById("sidebarToggle");
+const sidebarCloseMobileBtn = document.getElementById("sidebarCloseMobileBtn");
 const addMoreBtn = document.getElementById("addMoreBtn");
 
 let currentMode = "qa";
@@ -79,14 +80,24 @@ window.addEventListener("error", () => {
 });
 
 // --- Initial Setup ---
+if (window.innerWidth <= 768 && sidebar) {
+  sidebar.classList.add("collapsed");
+}
 initializeApiKeyGate();
 setupEventListeners();
 updateStatusIndicator();
 refreshDocuments();
+window.addEventListener("resize", () => {
+  if (!sidebar) return;
+  if (window.innerWidth > 768) {
+    sidebar.classList.remove("collapsed");
+  }
+});
 
 // --- Setup Event Listeners ---
 function setupEventListeners() {
-  if (sidebarToggle) sidebarToggle.addEventListener("click", () => sidebar.classList.toggle("collapsed"));
+  if (sidebarToggle) sidebarToggle.addEventListener("click", () => toggleMobileSidebar());
+  if (sidebarCloseMobileBtn) sidebarCloseMobileBtn.addEventListener("click", () => toggleMobileSidebar());
   if (fileUpload) fileUpload.addEventListener("change", handleFileSelection);
   if (uploadFilesBtn) uploadFilesBtn.addEventListener("click", uploadSelectedFiles);
   if (addMoreBtn) addMoreBtn.addEventListener("click", showUploadArea);
@@ -175,6 +186,11 @@ function setupEventListeners() {
 }
 
 // --- API Key Gate ---
+function toggleMobileSidebar() {
+  if (!sidebar) return;
+  sidebar.classList.toggle("collapsed");
+}
+
 function initializeApiKeyGate() {
   if (!apiKeyModal || !apiKeyInput || !apiKeyContinueBtn) {
     apiGateResolved = true;

@@ -560,16 +560,39 @@
         .hero-title { font-size: 2.5rem; color: white; font-weight: 800; }
         .hero-subtitle { max-width: 400px; line-height: 1.6; }
 
+        .mobile-close-btn { display: none; }
+
         /* --- Responsive --- */
         @media (max-width: 768px) {
+            .mobile-close-btn { display: flex; align-items: center; justify-content: center; }
             .sidebar {
                 position: absolute;
                 height: 100%;
                 width: 280px;
                 transform: translateX(-100%);
+                z-index: 1000;
+                box-shadow: 5px 0 25px rgba(0,0,0,0.5);
             }
             .sidebar.mobile-open {
                 transform: translateX(0);
+            }
+            .main-workspace {
+                width: 100%;
+                flex: 1;
+            }
+            .chat-input-wrapper {
+                padding: 1rem;
+                bottom: 0;
+            }
+            .message {
+                max-width: 95%;
+            }
+            .hero-title {
+                font-size: 1.8rem;
+            }
+            .hero-subtitle {
+                font-size: 0.9rem;
+                padding: 0 1rem;
             }
         }
     </style>
@@ -583,11 +606,16 @@
     <div class="app-shell">
         <!-- Sidebar -->
         <aside id="sidebar" class="sidebar">
-            <div class="sidebar-header">
-                <div class="logo-box">
-                    <i class="fas fa-bolt"></i>
+            <div class="sidebar-header" style="justify-content: space-between;">
+                <div style="display: flex; align-items: center; gap: 0.75rem;">
+                    <div class="logo-box">
+                        <i class="fas fa-bolt"></i>
+                    </div>
+                    <h1 style="font-size: 1.25rem; font-weight: 800; letter-spacing: -0.02em;">Buddy <span style="color: var(--accent-primary)">AI</span></h1>
                 </div>
-                <h1 style="font-size: 1.25rem; font-weight: 800; letter-spacing: -0.02em;">Buddy <span style="color: var(--accent-primary)">AI</span></h1>
+                <button class="sidebar-toggle-btn mobile-close-btn" onclick="toggleSidebar()" title="Toggle Sidebar">
+                    <i class="fas fa-bars-staggered"></i>
+                </button>
             </div>
 
             <div class="sidebar-content">
@@ -734,7 +762,7 @@
     <script>
         const API_BASE = window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1" 
             ? "http://127.0.0.1:8000" 
-            : "https://your-buddy-1.onrender.com";
+            : "https://your-buddy-us.onrender.com";
 
         let state = {
             mode: 'qa',
@@ -830,7 +858,11 @@
 
         // --- UI Interactions ---
         function toggleSidebar() {
-            document.getElementById('sidebar').classList.toggle('collapsed');
+            if (window.innerWidth <= 768) {
+                document.getElementById('sidebar').classList.toggle('mobile-open');
+            } else {
+                document.getElementById('sidebar').classList.toggle('collapsed');
+            }
         }
 
         function setupModeSwitcher() {
